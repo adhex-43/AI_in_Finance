@@ -39,7 +39,22 @@ def load_data():
 train_signals,test_signals,train_tx,test_tx=load_data()
 
 tx=train_tx.merge(train_signals[['signal_id','signal_sanasi']],on='signal_id',how='left')
-tx['days_before_signal']=(tx['signal_sanasi'].dt.normalize()-tx['tranzaksiya_vaqti'].dt.normalize()).dt.days
+# Convert both datetime columns to UTC, then remove timezone
+tx['signal_sanasi'] = (
+    pd.to_datetime(tx['signal_sanasi'], utc=True)
+    .dt.tz_localize(None)
+)
+
+tx['tranzaksiya_vaqti'] = (
+    pd.to_datetime(tx['tranzaksiya_vaqti'], utc=True)
+    .dt.tz_localize(None)
+)
+
+# Calculate number of days before the signal
+tx['days_before_signal'] = (
+    tx['signal_sanasi'].dt.normalize()
+    - tx['tranzaksiya_vaqti'].dt.normalize()
+).dt.days
 tx['hour']=tx['tranzaksiya_vaqti'].dt.hour
 tx['weekday']=tx['tranzaksiya_vaqti'].dt.weekday
 tx['is_weekend']=(tx['weekday']>=5).astype(int)
