@@ -27,9 +27,13 @@ html,body,[class*="css"]{font-family:Inter,sans-serif}.stApp{background:radial-g
 @st.cache_data(show_spinner='Loading financial intelligence...')
 def load_data():
     ts=pd.read_csv('train_signals.csv'); te=pd.read_csv('test_signals.csv')
-    tt=pd.read_parquet('train_transactions.parquet'); tet=pd.read_parquet('test_transactions.parquet')
+    tt = pd.read_parquet(
+    'AI_Finance_Hackathon/data/train_transactions.parquet'
+)
     ts['signal_sanasi']=pd.to_datetime(ts['signal_sanasi']); te['signal_sanasi']=pd.to_datetime(te['signal_sanasi'])
-    tt['tranzaksiya_vaqti']=pd.to_datetime(tt['tranzaksiya_vaqti']); tet['tranzaksiya_vaqti']=pd.to_datetime(tet['tranzaksiya_vaqti'])
+    tet = pd.read_parquet(
+    'AI_Finance_Hackathon/data/test_transactions.parquet'
+)
     return ts,te,tt,tet
 
 train_signals,test_signals,train_tx,test_tx=load_data()
