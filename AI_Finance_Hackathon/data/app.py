@@ -27,34 +27,15 @@ html,body,[class*="css"]{font-family:Inter,sans-serif}.stApp{background:radial-g
 @st.cache_data(show_spinner='Loading financial intelligence...')
 def load_data():
     ts=pd.read_csv('train_signals.csv'); te=pd.read_csv('test_signals.csv')
-    tt = pd.read_parquet(
-    'AI_Finance_Hackathon/data/train_transactions.parquet'
-)
+    tt=pd.read_parquet('train_transactions.parquet'); tet=pd.read_parquet('test_transactions.parquet')
     ts['signal_sanasi']=pd.to_datetime(ts['signal_sanasi']); te['signal_sanasi']=pd.to_datetime(te['signal_sanasi'])
-    tet = pd.read_parquet(
-    'AI_Finance_Hackathon/data/test_transactions.parquet'
-)
+    tt['tranzaksiya_vaqti']=pd.to_datetime(tt['tranzaksiya_vaqti']); tet['tranzaksiya_vaqti']=pd.to_datetime(tet['tranzaksiya_vaqti'])
     return ts,te,tt,tet
 
 train_signals,test_signals,train_tx,test_tx=load_data()
 
 tx=train_tx.merge(train_signals[['signal_id','signal_sanasi']],on='signal_id',how='left')
-# Convert both datetime columns to UTC, then remove timezone
-tx['signal_sanasi'] = (
-    pd.to_datetime(tx['signal_sanasi'], utc=True)
-    .dt.tz_localize(None)
-)
-
-tx['tranzaksiya_vaqti'] = (
-    pd.to_datetime(tx['tranzaksiya_vaqti'], utc=True)
-    .dt.tz_localize(None)
-)
-
-# Calculate number of days before the signal
-tx['days_before_signal'] = (
-    tx['signal_sanasi'].dt.normalize()
-    - tx['tranzaksiya_vaqti'].dt.normalize()
-).dt.days
+tx['days_before_signal']=(tx['signal_sanasi'].dt.normalize()-tx['tranzaksiya_vaqti'].dt.normalize()).dt.days
 tx['hour']=tx['tranzaksiya_vaqti'].dt.hour
 tx['weekday']=tx['tranzaksiya_vaqti'].dt.weekday
 tx['is_weekend']=(tx['weekday']>=5).astype(int)
@@ -149,3 +130,5 @@ elif page=='Findings':
     findings=[('01','Imbalanced target',f'{RATE:.2f}% of training signals were escalated, making this an imbalanced binary classification problem.'),('02','Large transaction universe',f'{NT:,} historical transaction records are linked to {N:,} labeled signals.'),('03','180-day history', 'Transactions span from the signal day to 180 days before the signal.'),('04','Behavior is multi-dimensional','Direction, transaction type, volume, timing and amount statistics provide complementary signal-level descriptors.'),('05','Recent activity matters','1-day, 7-day and 30-day windows provide a way to capture changes close to signal generation.'),('06','Modeling unit is the signal','Millions of transaction rows are aggregated into one feature vector per signal before classification.')]
     for n,t,x in findings: st.markdown(f'<div class="find"><div style="color:#00e5ff;font-size:9px;font-weight:800;letter-spacing:2px">FINDING {n}</div><b>{t}</b><span>{x}</span></div>',unsafe_allow_html=True)
     st.markdown('<div style="text-align:center;padding:35px 0;color:#59677b;font-size:11px;letter-spacing:2px">RAW TRANSACTIONS → BEHAVIORAL FEATURES → SIGNAL INTELLIGENCE</div>',unsafe_allow_html=True)
+
+v
