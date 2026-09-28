@@ -57,7 +57,13 @@ TOP_FEATURES = [
 def compute_all():
     """Statistikalar to'liq ma'lumotdan make_site_data.py orqali oldindan hisoblangan (site_data/ papkasi)."""
     import json
-    d = lambda f: P(os.path.join('site_data', f))
+    def d(f):
+        # site_data/ papkasida yoki to'g'ridan-to'g'ri app.py yonida bo'lishi mumkin
+        for p in (P(os.path.join('site_data', f)), P(f)):
+            if os.path.exists(p):
+                return p
+        st.error(f"'{f}' fayli topilmadi. site_data papkasidagi fayllarni app.py bilan bir papkaga yuklang.")
+        st.stop()
     S = json.load(open(d('summary.json')))
     R = {k: S[k] for k in ['n_train', 'n_test', 'n_tx', 'n_test_tx', 'rate', 'future_tx']}
     R['counts'] = pd.Series({int(k): v for k, v in S['counts'].items()}).sort_index()
