@@ -105,6 +105,13 @@ def insight(title, text):
 def card(col, label, value, hint=''):
     col.markdown(f'<div class="card"><div class="label">{label}</div><div class="value">{value}</div><div class="hint">{hint}</div></div>', unsafe_allow_html=True)
 
+
+REPO_URL = 'https://github.com/adhex-43/AI_in_Finance'
+NOTEBOOK_URL = 'https://github.com/adhex-43/AI_in_Finance/blob/main/AI_Finance_Hackathon/data/Hakathon_final.ipynb'
+LINK_STYLE = 'display:inline-block;margin:0 6px 6px 0;padding:9px 15px;border:1px solid rgba(0,229,255,.25);border-radius:10px;background:rgba(0,229,255,.05);color:#a5f3fc;text-decoration:none;font-size:12px;font-weight:600'
+LINKS_HTML = (f'<a href="{REPO_URL}" target="_blank" style="{LINK_STYLE}">⌥ GitHub repository</a>'
+              f'<a href="{NOTEBOOK_URL}" target="_blank" style="{LINK_STYLE}">▤ Reproducible notebook</a>')
+
 # ---------------- Hero ----------------
 st.markdown(f'''
 <div class="hero"><div class="hero-content">
@@ -113,6 +120,7 @@ st.markdown(f'''
 <h1>Financial Signal<br>Intelligence</h1>
 <p>Exploring historical transaction behavior to uncover the patterns behind alert escalation, and turning those patterns into a model that ranks which alerts are most likely to be escalated.</p>
 <div class="mini-row"><div class="mini"><b>{N:,}</b><small>TRAIN SIGNALS</small></div><div class="mini"><b>{NT/1e6:.2f}M</b><small>TRANSACTIONS</small></div><div class="mini"><b>248</b><small>FEATURES</small></div><div class="mini"><b>{FINAL_AUC:.3f}</b><small>OOF ROC-AUC</small></div></div>
+<div style="margin-top:22px">{LINKS_HTML}</div>
 </div><div class="orbit"><div class="core"><div><strong>{RATE:.2f}%</strong><span>ESCALATION RATE</span></div></div></div></div>
 ''', unsafe_allow_html=True)
 
@@ -321,4 +329,6 @@ elif page == 'Findings':
             'The strongest evidence of escalation lies in the size profile of specific transaction channels, compared with the client\'s own history.')
     insight('Limitations & next steps', 'The data is synthetic and the separating signal is weak (AUC ≈ 0.64). Next steps: sequence models over raw transactions, '
             'finer burst-shape features and hyperparameter search with repeated CV.')
+    section('Code & Reproducibility', 'Everything needed to reproduce the submission and this website.')
+    st.markdown(f'<div>{LINKS_HTML}</div>', unsafe_allow_html=True)
     st.markdown('<div style="text-align:center;padding:35px 0;color:#59677b;font-size:11px;letter-spacing:2px">RAW TRANSACTIONS → BEHAVIORAL FEATURES → SIGNAL INTELLIGENCE · TEAM A3783E69</div>', unsafe_allow_html=True)
