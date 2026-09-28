@@ -55,59 +55,28 @@ TOP_FEATURES = [
 # ---------------- Data (all heavy work cached once; raw transactions are not kept in memory) ----------------
 @st.cache_data(show_spinner='Loading financial intelligence...')
 def compute_all():
-    import pyarrow.parquet as pq
-    ts = pd.read_csv(P('train_signals.csv'), parse_dates=['signal_sanasi'])
-    te = pd.read_csv(P('test_signals.csv'))
-    n_test_tx = pq.ParquetFile(P('test_transactions.parquet')).metadata.num_rows
-    tx = pd.read_parquet(P('train_transactions.parquet'))
-    tx['tranzaksiya_vaqti'] = pd.to_datetime(tx['tranzaksiya_vaqti'])
-    for c in ['kirim_chiqim', 'tranzaksiya_turi', 'signal_id']:
-        tx[c] = tx[c].astype('category')
-    tx = tx.merge(ts[['signal_id', 'signal_sanasi', 'eskalatsiya']], on='signal_id', how='left')
-    tx['days'] = (tx['signal_sanasi'] - tx['tranzaksiya_vaqti'].dt.normalize()).dt.days.astype('int16')
-    h = tx['tranzaksiya_vaqti'].dt.hour
-    tx['night'] = ((h < 6) | (h >= 22)).astype('int8')
-    tx['weekend'] = (tx['tranzaksiya_vaqti'].dt.weekday >= 5).astype('int8')
-    for w in (1, 7, 30):
-        tx[f'last_{w}d'] = (tx['days'] <= w).astype('int8')
-
-    R = {'n_train': len(ts), 'n_test': len(te), 'n_tx': len(tx), 'n_test_tx': n_test_tx,
-         'rate': ts['eskalatsiya'].mean() * 100, 'future_tx': int((tx['days'] < 0).sum())}
-    R['counts'] = ts['eskalatsiya'].value_counts().sort_index()
-    R['monthly_signals'] = ts.set_index('signal_sanasi').resample('ME').agg(
-        signals=('eskalatsiya', 'size'), rate=('eskalatsiya', 'mean')).reset_index()
-    R['dir_counts'] = tx['kirim_chiqim'].value_counts()
-    R['type_counts'] = tx['tranzaksiya_turi'].value_counts()
-    R['days_desc'] = tx['days'].describe()
-
-    # Share by class
-    R['type_share'] = pd.crosstab(tx['eskalatsiya'], tx['tranzaksiya_turi'], normalize='index')
-    R['dir_share'] = pd.crosstab(tx['eskalatsiya'], tx['kirim_chiqim'], normalize='index')
-
-    # Daily activity before the signal, per class (avg transactions per signal)
-    per_class = R['counts']
-    daily = tx.groupby(['eskalatsiya', 'days']).size().unstack(0)
-    R['daily'] = daily.div(per_class, axis=1).reset_index()
-    R['daily_dir'] = (tx.groupby(['days', 'kirim_chiqim'], observed=True).size().unstack() / R['n_train']).reset_index()
-
-    # Amount distribution by class
-    bins = np.linspace(-3, 7, 81)
-    R['amt_bins'] = bins
-    R['amt_hist'] = {c: np.histogram(tx.loc[tx['eskalatsiya'] == c, 'miqdor_indeksi'], bins=bins, density=True)[0] for c in (0, 1)}
-    R['amt_by_type'] = tx.groupby(['tranzaksiya_turi', 'kirim_chiqim'], observed=True)['miqdor_indeksi'].median().unstack()
-
-    # Signal-level table
-    g = tx.groupby('signal_id', observed=True)
-    sig = pd.DataFrame({
-        'transactions': g.size(), 'last_1d': g['last_1d'].sum(), 'last_7d': g['last_7d'].sum(),
-        'last_30d': g['last_30d'].sum(), 'night_ratio': g['night'].mean(), 'weekend_ratio': g['weekend'].mean(),
-        'amt_mean': g['miqdor_indeksi'].mean(), 'amt_min': g['miqdor_indeksi'].min(), 'amt_max': g['miqdor_indeksi'].max()})
-    sig['share_last_7d'] = sig['last_7d'] / sig['transactions']
-    td = tx.groupby(['signal_id', 'tranzaksiya_turi', 'kirim_chiqim'], observed=True)['miqdor_indeksi'].mean().unstack([1, 2])
-    td.columns = [f'amtmean_{a}_{b}' for a, b in td.columns]
-    sig = sig.join(td).join(ts.set_index('signal_id')['eskalatsiya'])
-    sig['outcome'] = sig['eskalatsiya'].map({0: 'Dismissed', 1: 'Escalated'})
-    R['sig'] = sig.reset_index()
+    """Statistikalar to'liq ma'lumotdan make_site_data.py orqali oldindan hisoblangan (site_data/ papkasi)."""
+    import json
+    d = lambda f: P(os.path.join('site_data', f))
+    S = json.load(open(d('summary.json')))
+    R = {k: S[k] for k in ['n_train', 'n_test', 'n_tx', 'n_test_tx', 'rate', 'future_tx']}
+    R['counts'] = pd.Series({int(k): v for k, v in S['counts'].items()}).sort_index()
+    R['dir_counts'] = pd.Series(S['dir_counts']).sort_values(ascending=False)
+    R['type_counts'] = pd.Series(S['type_counts']).sort_values(ascending=False)
+    R['days_desc'] = pd.Series(S['days_desc'])
+    R['amt_bins'] = np.array(S['amt_bins'])
+    R['amt_hist'] = {int(k): np.array(v) for k, v in S['amt_hist'].items()}
+    R['monthly_signals'] = pd.read_csv(d('monthly_signals.csv'), parse_dates=['signal_sanasi'])
+    R['type_share'] = pd.read_csv(d('type_share.csv'), index_col=0)
+    R['dir_share'] = pd.read_csv(d('dir_share.csv'), index_col=0)
+    for k, name in [('type_share', 'tranzaksiya_turi'), ('dir_share', 'kirim_chiqim')]:
+        R[k].index = R[k].index.astype(int); R[k].columns.name = name
+    daily = pd.read_csv(d('daily.csv')); daily.columns = [c if c == 'days' else int(c) for c in daily.columns]
+    R['daily'] = daily
+    R['daily_dir'] = pd.read_csv(d('daily_dir.csv'))
+    R['amt_by_type'] = pd.read_csv(d('amt_by_type.csv'), index_col=0)
+    R['amt_by_type'].index.name = 'tranzaksiya_turi'
+    R['sig'] = pd.read_csv(d('signal_level.csv.gz'))
     return R
 
 R = compute_all()
