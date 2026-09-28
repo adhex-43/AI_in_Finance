@@ -3,6 +3,12 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
+import os
+
+# Fayllar har doim shu app.py turgan papkadan o'qiladi (Streamlit qayerdan ishga tushirsa ham)
+BASE = os.path.dirname(os.path.abspath(__file__))
+def P(name):
+    return os.path.join(BASE, name)
 
 st.set_page_config(page_title='AI in Finance — Signal Intelligence', page_icon='◈', layout='wide', initial_sidebar_state='collapsed')
 
@@ -23,112 +29,327 @@ html,body,[class*="css"]{font-family:Inter,sans-serif}.stApp{background:radial-g
 </style>
 ''', unsafe_allow_html=True)
 
-# ---------------- Data ----------------
+# Extra styles for new blocks
+st.markdown('''<style>
+.step{border:1px solid var(--line);background:rgba(255,255,255,.03);border-radius:16px;padding:18px;min-height:150px}
+.step .n{color:var(--cyan);font-size:10px;font-weight:800;letter-spacing:2px}.step b{display:block;font:600 16px Space Grotesk;margin-top:8px}
+.step span{display:block;color:#7c8a9d;font-size:12px;line-height:1.6;margin-top:6px}
+.note{color:#7c8a9d;font-size:12px;line-height:1.6;margin:-4px 0 18px}
+</style>''', unsafe_allow_html=True)
+
+# ---------------- Results from the submitted notebook (Hakathon_final.ipynb) ----------------
+MODEL_HISTORY = [("Logistic Regression (15 global features)", 0.566),
+                 ("HistGradientBoosting (global features)", 0.599),
+                 ("LightGBM + burst/baseline, type×direction features", 0.636)]
+FINAL_AUC = 0.6363
+DECILES = [0.092, 0.104, 0.113, 0.117, 0.136, 0.163, 0.194, 0.226, 0.276, 0.296]
+TOP_FEATURES = [
+    ("all_amt_min", 0.0627), ("base_amtmean_bank_otkazmasi_chiqim", 0.0574),
+    ("all_amtmean_bank_otkazmasi_chiqim", 0.0436), ("base_amtmean_naqd_kirim", 0.0429),
+    ("all_amtmean_naqd_kirim", 0.0352), ("base_amt_min", 0.0329),
+    ("base_amtmean_karta_chiqim", 0.0211), ("all_amtmean_karta_chiqim", 0.0202),
+    ("base_amtmean_bank_otkazmasi_kirim", 0.0172), ("all_amtmean_bank_otkazmasi_kirim", 0.0162),
+    ("w30_amtmean_bank_otkazmasi_chiqim", 0.0157), ("w7_amtmean_karta_chiqim", 0.0106),
+    ("all_amtmean_xalqaro_chiqim", 0.0098), ("all_amt_max", 0.0084), ("w7_night_share", 0.0079)]
+
+# ---------------- Data (all heavy work cached once; raw transactions are not kept in memory) ----------------
 @st.cache_data(show_spinner='Loading financial intelligence...')
-def load_data():
-    ts=pd.read_csv('train_signals.csv'); te=pd.read_csv('test_signals.csv')
-    tt=pd.read_parquet('train_transactions.parquet'); tet=pd.read_parquet('test_transactions.parquet')
-    ts['signal_sanasi']=pd.to_datetime(ts['signal_sanasi']); te['signal_sanasi']=pd.to_datetime(te['signal_sanasi'])
-    tt['tranzaksiya_vaqti']=pd.to_datetime(tt['tranzaksiya_vaqti']); tet['tranzaksiya_vaqti']=pd.to_datetime(tet['tranzaksiya_vaqti'])
-    return ts,te,tt,tet
+def compute_all():
+    import pyarrow.parquet as pq
+    ts = pd.read_csv(P('train_signals.csv'), parse_dates=['signal_sanasi'])
+    te = pd.read_csv(P('test_signals.csv'))
+    n_test_tx = pq.ParquetFile(P('test_transactions.parquet')).metadata.num_rows
+    tx = pd.read_parquet(P('train_transactions.parquet'))
+    tx['tranzaksiya_vaqti'] = pd.to_datetime(tx['tranzaksiya_vaqti'])
+    for c in ['kirim_chiqim', 'tranzaksiya_turi', 'signal_id']:
+        tx[c] = tx[c].astype('category')
+    tx = tx.merge(ts[['signal_id', 'signal_sanasi', 'eskalatsiya']], on='signal_id', how='left')
+    tx['days'] = (tx['signal_sanasi'] - tx['tranzaksiya_vaqti'].dt.normalize()).dt.days.astype('int16')
+    h = tx['tranzaksiya_vaqti'].dt.hour
+    tx['night'] = ((h < 6) | (h >= 22)).astype('int8')
+    tx['weekend'] = (tx['tranzaksiya_vaqti'].dt.weekday >= 5).astype('int8')
+    for w in (1, 7, 30):
+        tx[f'last_{w}d'] = (tx['days'] <= w).astype('int8')
 
-train_signals,test_signals,train_tx,test_tx=load_data()
+    R = {'n_train': len(ts), 'n_test': len(te), 'n_tx': len(tx), 'n_test_tx': n_test_tx,
+         'rate': ts['eskalatsiya'].mean() * 100, 'future_tx': int((tx['days'] < 0).sum())}
+    R['counts'] = ts['eskalatsiya'].value_counts().sort_index()
+    R['monthly_signals'] = ts.set_index('signal_sanasi').resample('ME').agg(
+        signals=('eskalatsiya', 'size'), rate=('eskalatsiya', 'mean')).reset_index()
+    R['dir_counts'] = tx['kirim_chiqim'].value_counts()
+    R['type_counts'] = tx['tranzaksiya_turi'].value_counts()
+    R['days_desc'] = tx['days'].describe()
 
-tx=train_tx.merge(train_signals[['signal_id','signal_sanasi']],on='signal_id',how='left')
-tx['days_before_signal']=(tx['signal_sanasi'].dt.normalize()-tx['tranzaksiya_vaqti'].dt.normalize()).dt.days
-tx['hour']=tx['tranzaksiya_vaqti'].dt.hour
-tx['weekday']=tx['tranzaksiya_vaqti'].dt.weekday
-tx['is_weekend']=(tx['weekday']>=5).astype(int)
-tx['is_night']=((tx['hour']<6)|(tx['hour']>=22)).astype(int)
+    # Share by class
+    R['type_share'] = pd.crosstab(tx['eskalatsiya'], tx['tranzaksiya_turi'], normalize='index')
+    R['dir_share'] = pd.crosstab(tx['eskalatsiya'], tx['kirim_chiqim'], normalize='index')
 
-N=len(train_signals); NT=len(train_tx); TEST=len(test_signals); RATE=train_signals.eskalatsiya.mean()*100; AVG=NT/N
+    # Daily activity before the signal, per class (avg transactions per signal)
+    per_class = R['counts']
+    daily = tx.groupby(['eskalatsiya', 'days']).size().unstack(0)
+    R['daily'] = daily.div(per_class, axis=1).reset_index()
+    R['daily_dir'] = (tx.groupby(['days', 'kirim_chiqim'], observed=True).size().unstack() / R['n_train']).reset_index()
 
-# ---------------- Plot theme ----------------
-def fig_theme(fig,h=350):
-    fig.update_layout(height=h,paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='#0a101c',font=dict(family='Inter',color='#8b98aa'),margin=dict(l=20,r=20,t=48,b=30),title_font=dict(family='Space Grotesk',size=16,color='#edf7ff'),xaxis=dict(gridcolor='rgba(148,163,184,.07)',zerolinecolor='rgba(148,163,184,.07)'),yaxis=dict(gridcolor='rgba(148,163,184,.07)',zerolinecolor='rgba(148,163,184,.07)'),hoverlabel=dict(bgcolor='#101827',font_color='#fff'))
+    # Amount distribution by class
+    bins = np.linspace(-3, 7, 81)
+    R['amt_bins'] = bins
+    R['amt_hist'] = {c: np.histogram(tx.loc[tx['eskalatsiya'] == c, 'miqdor_indeksi'], bins=bins, density=True)[0] for c in (0, 1)}
+    R['amt_by_type'] = tx.groupby(['tranzaksiya_turi', 'kirim_chiqim'], observed=True)['miqdor_indeksi'].median().unstack()
+
+    # Signal-level table
+    g = tx.groupby('signal_id', observed=True)
+    sig = pd.DataFrame({
+        'transactions': g.size(), 'last_1d': g['last_1d'].sum(), 'last_7d': g['last_7d'].sum(),
+        'last_30d': g['last_30d'].sum(), 'night_ratio': g['night'].mean(), 'weekend_ratio': g['weekend'].mean(),
+        'amt_mean': g['miqdor_indeksi'].mean(), 'amt_min': g['miqdor_indeksi'].min(), 'amt_max': g['miqdor_indeksi'].max()})
+    sig['share_last_7d'] = sig['last_7d'] / sig['transactions']
+    td = tx.groupby(['signal_id', 'tranzaksiya_turi', 'kirim_chiqim'], observed=True)['miqdor_indeksi'].mean().unstack([1, 2])
+    td.columns = [f'amtmean_{a}_{b}' for a, b in td.columns]
+    sig = sig.join(td).join(ts.set_index('signal_id')['eskalatsiya'])
+    sig['outcome'] = sig['eskalatsiya'].map({0: 'Dismissed', 1: 'Escalated'})
+    R['sig'] = sig.reset_index()
+    return R
+
+R = compute_all()
+N, NT, TEST, RATE = R['n_train'], R['n_tx'], R['n_test'], R['rate']
+AVG = NT / N
+PLOT = {'displayModeBar': False}
+C0, C1 = '#526179', '#00e5ff'
+
+def fig_theme(fig, h=350):
+    fig.update_layout(height=h, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='#0a101c', font=dict(family='Inter', color='#8b98aa'),
+                      margin=dict(l=20, r=20, t=48, b=30), title_font=dict(family='Space Grotesk', size=16, color='#edf7ff'),
+                      xaxis=dict(gridcolor='rgba(148,163,184,.07)', zerolinecolor='rgba(148,163,184,.07)'),
+                      yaxis=dict(gridcolor='rgba(148,163,184,.07)', zerolinecolor='rgba(148,163,184,.07)'),
+                      hoverlabel=dict(bgcolor='#101827', font_color='#fff'), legend=dict(bgcolor='rgba(0,0,0,0)'))
     return fig
+
+def show(fig, h=350):
+    st.plotly_chart(fig_theme(fig, h), width='stretch', config=PLOT)
+
+def section(title, sub):
+    st.markdown(f'<div class="section">{title}</div><div class="sub">{sub}</div>', unsafe_allow_html=True)
+
+def insight(title, text):
+    st.markdown(f'<div class="find"><b>{title}</b><span>{text}</span></div>', unsafe_allow_html=True)
+
+def card(col, label, value, hint=''):
+    col.markdown(f'<div class="card"><div class="label">{label}</div><div class="value">{value}</div><div class="hint">{hint}</div></div>', unsafe_allow_html=True)
 
 # ---------------- Hero ----------------
 st.markdown(f'''
 <div class="hero"><div class="hero-content">
-<div class="status"><span class="dot"></span>SYSTEM OPERATIONAL · TRAIN DATA INDEXED</div>
+<div class="status"><span class="dot"></span>TEAM A3783E69 · FINAL MODEL ROC-AUC {FINAL_AUC:.3f}</div>
 <div class="kicker">AI IN FINANCE / SIGNAL ANALYTICS</div>
 <h1>Financial Signal<br>Intelligence</h1>
-<p>Exploring historical transaction behavior to uncover the patterns behind financial signal escalation — from raw transactions to signal-level intelligence.</p>
-<div class="mini-row"><div class="mini"><b>{N:,}</b><small>SIGNALS</small></div><div class="mini"><b>{NT/1e6:.2f}M</b><small>TRANSACTIONS</small></div><div class="mini"><b>180D</b><small>HISTORY WINDOW</small></div></div>
+<p>Exploring historical transaction behavior to uncover the patterns behind alert escalation, and turning those patterns into a model that ranks which alerts are most likely to be escalated.</p>
+<div class="mini-row"><div class="mini"><b>{N:,}</b><small>TRAIN SIGNALS</small></div><div class="mini"><b>{NT/1e6:.2f}M</b><small>TRANSACTIONS</small></div><div class="mini"><b>248</b><small>FEATURES</small></div><div class="mini"><b>{FINAL_AUC:.3f}</b><small>OOF ROC-AUC</small></div></div>
 </div><div class="orbit"><div class="core"><div><strong>{RATE:.2f}%</strong><span>ESCALATION RATE</span></div></div></div></div>
-''',unsafe_allow_html=True)
+''', unsafe_allow_html=True)
 
 # ---------------- Navigation ----------------
-if 'page' not in st.session_state: st.session_state.page='Overview'
-nav=st.columns(6)
-for i,(label,key) in enumerate([('◈ Overview','Overview'),('◎ Target','Target'),('⌁ Transactions','Transactions'),('◷ Temporal','Temporal'),('◇ Behavior','Behavior'),('✦ Findings','Findings')]):
-    if nav[i].button(label,use_container_width=True): st.session_state.page=key
-page=st.session_state.page
+PAGES = [('◈ Overview', 'Overview'), ('◎ Target', 'Target'), ('⌁ Transactions', 'Transactions'), ('◷ Temporal', 'Temporal'),
+         ('◇ Escalated vs Dismissed', 'Compare'), ('⚙ Features & Model', 'Model'), ('✦ Findings', 'Findings')]
+if 'page' not in st.session_state:
+    st.session_state.page = 'Overview'
+nav = st.columns(len(PAGES))
+for i, (label, key) in enumerate(PAGES):
+    if nav[i].button(label, width='stretch'):
+        st.session_state.page = key
+page = st.session_state.page
 
-# ---------------- KPIs ----------------
-if page=='Overview':
-    st.markdown('<div class="section">System Overview</div><div class="sub">A high-density view of the financial signal ecosystem.</div>',unsafe_allow_html=True)
-    cols=st.columns(5)
-    vals=[('TRAIN SIGNALS',f'{N:,}','labeled observations'),('TRANSACTIONS',f'{NT:,}','historical records'),('ESCALATION',f'{RATE:.2f}%','positive class'),('AVG / SIGNAL',f'{AVG:.1f}','transactions'),('HIDDEN TEST',f'{TEST:,}','prediction set')]
-    for c,(a,b,d) in zip(cols,vals): c.markdown(f'<div class="card"><div class="label">{a}</div><div class="value">{b}</div><div class="hint">{d}</div></div>',unsafe_allow_html=True)
+# ================= OVERVIEW =================
+if page == 'Overview':
+    section('Our Approach', 'From millions of raw transactions to one escalation probability per alert.')
+    steps = [('01', 'Explore', 'Studied target balance, transaction types, directions, amounts and timing relative to the alert date.'),
+             ('02', 'Aggregate', 'Each alert has ~500 transactions. We summarised them into one feature vector per signal_id.'),
+             ('03', 'Contrast', 'Split history into windows (1 / 7 / 30 days vs a 31–180 day baseline) to compare recent behavior with the client\'s normal behavior.'),
+             ('04', 'Model', 'LightGBM with 5-fold stratified CV × 3 seeds; out-of-fold ROC-AUC used for every decision.'),
+             ('05', 'Predict', 'Test predictions averaged over 15 models, merged by signal_id and validated against all submission rules.')]
+    cols = st.columns(5)
+    for c, (n, t, x) in zip(cols, steps):
+        c.markdown(f'<div class="step"><div class="n">STEP {n}</div><b>{t}</b><span>{x}</span></div>', unsafe_allow_html=True)
 
-    a,b=st.columns([1,1.35])
+    section('Dataset Overview', 'Four files: signals with labels, test signals, and the transaction history linked to each signal.')
+    cols = st.columns(5)
+    for c, v in zip(cols, [('TRAIN SIGNALS', f'{N:,}', 'labeled alerts'), ('TRAIN TRANSACTIONS', f'{NT:,}', 'historical records'),
+                           ('TEST SIGNALS', f'{TEST:,}', 'hidden labels'), ('TEST TRANSACTIONS', f"{R['n_test_tx']:,}", 'historical records'),
+                           ('AVG / SIGNAL', f'{AVG:.0f}', 'transactions per alert')]):
+        card(c, *v)
+    st.write('')
+    schema = pd.DataFrame({
+        'File': ['train_signals.csv', 'train_signals.csv', 'train_signals.csv', 'train_transactions.parquet', 'train_transactions.parquet',
+                 'train_transactions.parquet', 'train_transactions.parquet', 'train_transactions.parquet'],
+        'Column': ['signal_id', 'signal_sanasi', 'eskalatsiya', 'signal_id', 'tranzaksiya_vaqti', 'kirim_chiqim', 'tranzaksiya_turi', 'miqdor_indeksi'],
+        'Meaning': ['Unique alert ID', 'Alert date', 'Target: 1 = escalated, 0 = dismissed', 'Link to the alert (many rows per alert)',
+                    'Transaction timestamp', 'Direction: kirim (in) / chiqim (out)', 'karta, bank_otkazmasi, naqd, xalqaro', 'Standardised transaction size']})
+    st.dataframe(schema, width='stretch', hide_index=True)
+    insight('Relational structure', 'Transactions are a one-to-many table: the modeling unit is the signal, so every feature is an aggregation over that signal\'s history. '
+            f'We also verified there are {R["future_tx"]} transactions after the alert date, so there is no look-ahead leakage.')
+
+# ================= TARGET =================
+elif page == 'Target':
+    section('Target Distribution', 'What the model has to rank.')
+    counts = R['counts']
+    a, b = st.columns([1, 1.35])
     with a:
-        counts=train_signals.eskalatsiya.value_counts().sort_index()
-        fig=go.Figure(go.Pie(labels=['Dismissed','Escalated'],values=[counts.get(0,0),counts.get(1,0)],hole=.75,marker=dict(colors=['#263348','#00e5ff'],line=dict(color='#0a101c',width=4)),textinfo='percent'))
-        fig.update_layout(title='Escalation Distribution',annotations=[dict(text=f'{RATE:.1f}%',x=.5,y=.5,font=dict(size=28,color='#fff',family='Space Grotesk'),showarrow=False)])
-        fig_theme(fig,365); st.plotly_chart(fig,use_container_width=True,config={'displayModeBar':False})
+        fig = go.Figure(go.Pie(labels=['Dismissed', 'Escalated'], values=[counts.get(0, 0), counts.get(1, 0)], hole=.75,
+                               marker=dict(colors=['#263348', C1], line=dict(color='#0a101c', width=4)), textinfo='percent'))
+        fig.update_layout(title='Escalated vs dismissed', annotations=[dict(text=f'{RATE:.1f}%', x=.5, y=.5, font=dict(size=28, color='#fff'), showarrow=False)])
+        show(fig, 380)
     with b:
-        monthly=train_signals.set_index('signal_sanasi').resample('ME').size().reset_index(name='signals')
-        fig=go.Figure(go.Scatter(x=monthly.signal_sanasi,y=monthly.signals,mode='lines',line=dict(color='#00e5ff',width=3),fill='tozeroy',fillcolor='rgba(0,229,255,.07)'))
-        fig.update_layout(title='Signal Generation Timeline'); fig_theme(fig,365); st.plotly_chart(fig,use_container_width=True,config={'displayModeBar':False})
+        m = R['monthly_signals']
+        fig = go.Figure()
+        fig.add_bar(x=m['signal_sanasi'], y=m['signals'], name='Signals', marker_color='#263348')
+        fig.add_scatter(x=m['signal_sanasi'], y=m['rate'] * 100, name='Escalation %', yaxis='y2', line=dict(color=C1, width=3))
+        fig.update_layout(title='Signals and escalation rate by month', yaxis2=dict(overlaying='y', side='right', title='%', showgrid=False))
+        show(fig, 380)
+    cols = st.columns(3)
+    card(cols[0], 'DISMISSED', f'{counts.get(0, 0):,}'); card(cols[1], 'ESCALATED', f'{counts.get(1, 0):,}'); card(cols[2], 'POSITIVE RATE', f'{RATE:.2f}%')
+    st.write('')
+    insight('Imbalanced, but AUC does not need resampling',
+            'Only about one in six alerts is escalated. ROC-AUC measures ranking quality, so we did not oversample or re-weight classes; we optimised ranking directly.')
+    insight('Stable over time', 'Train and test cover the same period (2025-01 to 2026-12) and the monthly escalation rate has no strong trend, so a random stratified split is a fair validation scheme.')
 
-    st.markdown('<div class="section">Transaction Flow</div><div class="sub">How the transaction universe is distributed across direction and type.</div>',unsafe_allow_html=True)
-    a,b=st.columns(2)
+# ================= TRANSACTIONS =================
+elif page == 'Transactions':
+    section('Transaction Composition', 'Direction, type and size of ~7 million historical transactions.')
+    a, b = st.columns(2)
     with a:
-        d=train_tx.kirim_chiqim.value_counts().reset_index(); d.columns=['direction','count']
-        fig=px.bar(d,x='count',y='direction',orientation='h',title='Incoming vs outgoing',text='count'); fig.update_traces(marker_color='#00e5ff',texttemplate='%{text:,}',textposition='outside'); fig_theme(fig,350); st.plotly_chart(fig,use_container_width=True,config={'displayModeBar':False})
+        d = R['dir_counts'].reset_index(); d.columns = ['direction', 'count']
+        fig = px.pie(d, names='direction', values='count', hole=.68, title='Direction', color_discrete_sequence=[C1, '#8b5cf6'])
+        show(fig, 380)
     with b:
-        d=train_tx.tranzaksiya_turi.value_counts().reset_index(); d.columns=['type','count']
-        fig=px.bar(d,x='type',y='count',title='Transaction types',text='count'); fig.update_traces(marker_color='#8b5cf6',texttemplate='%{text:,}',textposition='outside'); fig_theme(fig,350); st.plotly_chart(fig,use_container_width=True,config={'displayModeBar':False})
-
-elif page=='Target':
-    st.markdown('<div class="section">Target Intelligence</div><div class="sub">The classification target the ML pipeline is learning to rank.</div>',unsafe_allow_html=True)
-    counts=train_signals.eskalatsiya.value_counts().sort_index(); p0=counts.get(0,0)/N*100;p1=counts.get(1,0)/N*100
-    fig=go.Figure(go.Bar(x=['Dismissed (0)','Escalated (1)'],y=[counts.get(0,0),counts.get(1,0)],marker_color=['#263348','#00e5ff'],text=[f'{counts.get(0,0):,}',f'{counts.get(1,0):,}'],textposition='outside')); fig.update_layout(title='Training Target Distribution');fig_theme(fig,430);st.plotly_chart(fig,use_container_width=True,config={'displayModeBar':False})
-    cols=st.columns(3)
-    for c,label,val in zip(cols,['DISMISSED','ESCALATED','POSITIVE RATE'],[f'{counts.get(0,0):,}',f'{counts.get(1,0):,}',f'{p1:.2f}%']): c.markdown(f'<div class="card"><div class="label">{label}</div><div class="value">{val}</div></div>',unsafe_allow_html=True)
-    st.markdown('<div class="find"><b>Class imbalance is a core modeling consideration.</b><span>Only a minority of labeled signals were escalated. Ranking-oriented metrics such as ROC-AUC are therefore more informative than accuracy alone.</span></div>',unsafe_allow_html=True)
-
-elif page=='Transactions':
-    st.markdown('<div class="section">Transaction Intelligence</div><div class="sub">Decomposing nearly seven million historical records into interpretable patterns.</div>',unsafe_allow_html=True)
-    a,b=st.columns(2)
+        d = R['type_counts'].reset_index(); d.columns = ['type', 'count']
+        fig = px.bar(d, x='type', y='count', text='count', title='Transaction type')
+        fig.update_traces(marker_color='#8b5cf6', texttemplate='%{text:,}', textposition='outside'); show(fig, 380)
+    a, b = st.columns(2)
     with a:
-        d=train_tx.kirim_chiqim.value_counts().reset_index();d.columns=['direction','count'];fig=px.pie(d,names='direction',values='count',hole=.68,title='Transaction direction');fig_theme(fig,390);st.plotly_chart(fig,use_container_width=True,config={'displayModeBar':False})
+        fig = px.histogram(R['sig'], x='transactions', nbins=60, title='Transactions per signal')
+        fig.update_traces(marker_color=C1); show(fig, 360)
     with b:
-        d=train_tx.tranzaksiya_turi.value_counts().reset_index();d.columns=['type','count'];fig=px.bar(d,x='type',y='count',text='count',title='Transaction type');fig.update_traces(marker_color='#8b5cf6',texttemplate='%{text:,}',textposition='outside');fig_theme(fig,390);st.plotly_chart(fig,use_container_width=True,config={'displayModeBar':False})
-    per=train_tx.groupby('signal_id').size().reset_index(name='transactions');fig=px.histogram(per,x='transactions',nbins=55,title='Transaction count distribution per signal');fig.update_traces(marker_color='#00e5ff');fig_theme(fig,390);st.plotly_chart(fig,use_container_width=True,config={'displayModeBar':False})
+        d = R['amt_by_type'].reset_index().melt(id_vars='tranzaksiya_turi', var_name='direction', value_name='median')
+        fig = px.bar(d, x='tranzaksiya_turi', y='median', color='direction', barmode='group', title='Median size by type and direction',
+                     color_discrete_sequence=[C1, '#8b5cf6'])
+        show(fig, 360)
+    insight('Incoming dominates, cards and bank transfers dominate',
+            'About three quarters of transactions are incoming. Cash and international transfers are rare, but they have their own size profiles, '
+            'which is why we built features for every type × direction combination instead of global averages only.')
 
-elif page=='Temporal':
-    st.markdown('<div class="section">Temporal Intelligence</div><div class="sub">The 180-day historical window surrounding every signal.</div>',unsafe_allow_html=True)
-    fig=px.histogram(tx,x='days_before_signal',nbins=60,title='Transaction timing before signal');fig.update_traces(marker_color='#00e5ff');fig_theme(fig,400);st.plotly_chart(fig,use_container_width=True,config={'displayModeBar':False})
-    a,b,c,d=st.columns(4); s=tx.days_before_signal.describe();
-    for col,label,val in zip([a,b,c,d],['MIN','MEDIAN','75TH PERCENTILE','MAX'],[s['min'],s['50%'],s['75%'],s['max']]): col.markdown(f'<div class="card"><div class="label">{label}</div><div class="value">{val:.0f}<span style="font-size:12px;color:#58677c"> DAYS</span></div></div>',unsafe_allow_html=True)
-    monthly=tx.assign(day=tx.signal_sanasi.dt.to_period('M').dt.to_timestamp()).groupby('day').size().reset_index(name='transactions');fig=px.line(monthly,x='day',y='transactions',title='Historical transaction volume by signal month');fig.update_traces(line_color='#8b5cf6');fig_theme(fig,350);st.plotly_chart(fig,use_container_width=True,config={'displayModeBar':False})
+# ================= TEMPORAL =================
+elif page == 'Temporal':
+    section('Activity Before the Signal', 'How transaction activity evolves across the 180-day window before each alert.')
+    d = R['daily'].rename(columns={0: 'Dismissed', 1: 'Escalated'})
+    fig = go.Figure()
+    fig.add_scatter(x=d['days'], y=d['Dismissed'], name='Dismissed', line=dict(color=C0, width=2))
+    fig.add_scatter(x=d['days'], y=d['Escalated'], name='Escalated', line=dict(color=C1, width=2))
+    fig.update_layout(title='Average transactions per signal, by days before the alert', xaxis=dict(autorange='reversed', title='days before alert'))
+    show(fig, 420)
+    dd = R['daily_dir']
+    fig = go.Figure()
+    for col, color in [('kirim', C1), ('chiqim', '#8b5cf6')]:
+        if col in dd:
+            fig.add_scatter(x=dd['days'], y=dd[col], name=col, line=dict(color=color, width=2))
+    fig.update_layout(title='Incoming vs outgoing activity before the alert', xaxis=dict(autorange='reversed', title='days before alert'))
+    show(fig, 360)
+    s = R['days_desc']; cols = st.columns(4)
+    for col, label, val in zip(cols, ['MIN', 'MEDIAN', '75TH PERCENTILE', 'MAX'], [s['min'], s['50%'], s['75%'], s['max']]):
+        card(col, label, f'{val:.0f} <span style="font-size:12px;color:#58677c">DAYS</span>')
+    st.write('')
+    insight('Alerts are triggered by bursts', 'Activity rises sharply in the last days before the alert for almost every signal. '
+            'Because the burst appears for both classes, its existence alone does not separate them; what matters is how the burst compares to the client\'s own baseline. '
+            'This led to our window features (1 / 7 / 30 days) and burst-vs-baseline contrast features.')
 
-elif page=='Behavior':
-    st.markdown('<div class="section">Behavioral Intelligence</div><div class="sub">Signal-level features derived from transaction timing and activity.</div>',unsafe_allow_html=True)
-    behavior=tx.groupby('signal_id').agg(transaction_count=('signal_id','size'),last_1d=('days_before_signal',lambda x:(x<=1).sum()),last_7d=('days_before_signal',lambda x:(x<=7).sum()),last_30d=('days_before_signal',lambda x:(x<=30).sum()),weekend_ratio=('is_weekend','mean'),night_ratio=('is_night','mean')).reset_index().merge(train_signals[['signal_id','eskalatsiya']],on='signal_id')
-    behavior['outcome']=behavior.eskalatsiya.map({0:'Dismissed',1:'Escalated'})
-    metric=st.selectbox('Behavioral signal',['last_1d','last_7d','last_30d','weekend_ratio','night_ratio'])
-    d=behavior.groupby('outcome')[metric].mean().reset_index();fig=px.bar(d,x='outcome',y=metric,text_auto='.3f',title=f'{metric} by outcome');fig.update_traces(marker_color='#00e5ff');fig_theme(fig,400);st.plotly_chart(fig,use_container_width=True,config={'displayModeBar':False})
-    summary=behavior.groupby('outcome')[['transaction_count','last_1d','last_7d','last_30d','weekend_ratio','night_ratio']].mean().round(3);st.dataframe(summary,use_container_width=True)
+# ================= COMPARE =================
+elif page == 'Compare':
+    section('Escalated vs Dismissed', 'Where do the two groups actually differ?')
+    sig = R['sig']
+    a, b = st.columns(2)
+    with a:
+        ts_ = R['type_share'].T.reset_index().rename(columns={0: 'Dismissed', 1: 'Escalated'})
+        fig = go.Figure([go.Bar(x=ts_['tranzaksiya_turi'], y=ts_['Dismissed'] * 100, name='Dismissed', marker_color=C0),
+                         go.Bar(x=ts_['tranzaksiya_turi'], y=ts_['Escalated'] * 100, name='Escalated', marker_color=C1)])
+        fig.update_layout(title='Transaction type share (%)', barmode='group'); show(fig, 360)
+    with b:
+        bins = R['amt_bins']; mid = (bins[1:] + bins[:-1]) / 2
+        fig = go.Figure([go.Scatter(x=mid, y=R['amt_hist'][0], name='Dismissed', line=dict(color=C0, width=2)),
+                         go.Scatter(x=mid, y=R['amt_hist'][1], name='Escalated', line=dict(color=C1, width=2))])
+        fig.update_layout(title='Transaction size distribution (density)', xaxis_title='miqdor_indeksi'); show(fig, 360)
 
-elif page=='Findings':
-    st.markdown('<div class="section">Key Findings</div><div class="sub">The main observations that informed signal-level feature engineering.</div>',unsafe_allow_html=True)
-    findings=[('01','Imbalanced target',f'{RATE:.2f}% of training signals were escalated, making this an imbalanced binary classification problem.'),('02','Large transaction universe',f'{NT:,} historical transaction records are linked to {N:,} labeled signals.'),('03','180-day history', 'Transactions span from the signal day to 180 days before the signal.'),('04','Behavior is multi-dimensional','Direction, transaction type, volume, timing and amount statistics provide complementary signal-level descriptors.'),('05','Recent activity matters','1-day, 7-day and 30-day windows provide a way to capture changes close to signal generation.'),('06','Modeling unit is the signal','Millions of transaction rows are aggregated into one feature vector per signal before classification.')]
-    for n,t,x in findings: st.markdown(f'<div class="find"><div style="color:#00e5ff;font-size:9px;font-weight:800;letter-spacing:2px">FINDING {n}</div><b>{t}</b><span>{x}</span></div>',unsafe_allow_html=True)
-    st.markdown('<div style="text-align:center;padding:35px 0;color:#59677b;font-size:11px;letter-spacing:2px">RAW TRANSACTIONS → BEHAVIORAL FEATURES → SIGNAL INTELLIGENCE</div>',unsafe_allow_html=True)
+    metrics = {'Minimum transaction size': 'amt_min', 'Mean transaction size': 'amt_mean',
+               'Mean size: bank transfer OUT': 'amtmean_bank_otkazmasi_chiqim', 'Mean size: cash IN': 'amtmean_naqd_kirim',
+               'Mean size: card OUT': 'amtmean_karta_chiqim', 'Transactions in last 7 days': 'last_7d',
+               'Share of history in last 7 days': 'share_last_7d', 'Total transactions': 'transactions', 'Night ratio': 'night_ratio'}
+    metrics = {k: v for k, v in metrics.items() if v in sig.columns}
+    choice = st.selectbox('Signal-level metric', list(metrics))
+    col = metrics[choice]
+    a, b = st.columns([1.4, 1])
+    with a:
+        lo, hi = sig[col].quantile([.01, .99])
+        fig = px.box(sig[sig[col].between(lo, hi)], x='outcome', y=col, color='outcome', points=False,
+                     color_discrete_map={'Dismissed': C0, 'Escalated': C1}, title=f'{choice} by outcome')
+        show(fig, 400)
+    with b:
+        dec = pd.qcut(sig[col].rank(method='first'), 5, labels=['Q1 low', 'Q2', 'Q3', 'Q4', 'Q5 high'])
+        rate = sig.groupby(dec, observed=True)['eskalatsiya'].mean().mul(100).reset_index()
+        fig = px.bar(rate, x=col, y='eskalatsiya', title='Escalation % by quintile', text_auto='.1f')
+        fig.update_traces(marker_color=C1); fig.update_layout(xaxis_title='', yaxis_title='%'); show(fig, 400)
 
-v
+    summary = sig.groupby('outcome')[list(metrics.values())].mean().T
+    summary.index = list(metrics.keys())
+    st.dataframe(summary.round(3), width='stretch')
+    insight('Global shares are almost identical', 'Type and direction shares differ by only a fraction of a percentage point between the classes '
+            '(cash 6.3% vs 6.5%, outgoing 24.3% vs 24.7%). Simple counts and shares are weak signals.')
+    insight('Size within a channel is the strongest signal', 'Escalated alerts tend to have smaller transactions overall and a different size profile '
+            'inside specific channels (bank-transfer outflows, cash inflows, card outflows). This is visible in the quintile charts above and it is exactly what the model relied on most.')
+
+# ================= MODEL =================
+elif page == 'Model':
+    section('Feature Engineering', '248 signal-level features, every group motivated by an EDA observation.')
+    groups = [('Global statistics', 'Count, mean, std, min, max, median of transaction size over the whole history.', 'Baseline descriptors.'),
+              ('Type × direction', 'Share and mean size for each of the 8 combinations (e.g. naqd_kirim, bank_otkazmasi_chiqim).', 'Global shares were nearly identical between classes; size inside a channel was not.'),
+              ('Time windows', 'The same statistics for the last 1, 7, 30 days and for the 31–180 day baseline.', 'Activity bursts right before the alert.'),
+              ('Burst vs baseline', 'Activity rate ratio, size z-score and share differences between recent windows and the baseline.', 'The burst exists for everyone; its deviation from normal behavior matters.'),
+              ('Velocity', 'Gaps between transactions in seconds, max transactions per hour and per day.', 'Bursts can be very fast.'),
+              ('Pass-through', 'Share of outflows occurring within 1h / 24h after an inflow, including similar-size pairs.', 'Classic money-movement pattern in monitoring.'),
+              ('Habits & calendar', 'Night and weekend ratios, history span, signal month and weekday.', 'Behavioral context.')]
+    st.dataframe(pd.DataFrame(groups, columns=['Feature group', 'What it measures', 'EDA motivation']), width='stretch', hide_index=True)
+
+    section('Model Progression', 'Out-of-fold ROC-AUC, 5-fold stratified CV.')
+    a, b = st.columns([1, 1])
+    with a:
+        h = pd.DataFrame(MODEL_HISTORY, columns=['model', 'auc'])
+        fig = px.bar(h, x='auc', y='model', orientation='h', text='auc', title='ROC-AUC by iteration')
+        fig.update_traces(marker_color=[C0, '#8b5cf6', C1], texttemplate='%{text:.3f}', textposition='outside')
+        fig.update_layout(xaxis=dict(range=[0.5, 0.66]), yaxis_title=''); show(fig, 360)
+    with b:
+        fig = go.Figure(go.Bar(x=[f'D{i + 1}' for i in range(10)], y=[v * 100 for v in DECILES], marker_color=C1, text=[f'{v * 100:.1f}%' for v in DECILES], textposition='outside'))
+        fig.add_hline(y=RATE, line_dash='dash', line_color='#8b98aa', annotation_text='average')
+        fig.update_layout(title='Real escalation rate by predicted-risk decile', xaxis_title='D1 = lowest predicted risk', yaxis_title='%'); show(fig, 360)
+
+    fi = pd.DataFrame(TOP_FEATURES, columns=['feature', 'importance']).iloc[::-1]
+    fig = px.bar(fi, x='importance', y='feature', orientation='h', title='Top-15 features (LightGBM gain share)')
+    fig.update_traces(marker_color=C1); fig.update_layout(yaxis_title=''); show(fig, 520)
+    insight('Validation setup', 'LightGBM (learning rate 0.02, 15 leaves, feature/bagging fraction, L2 regularisation, early stopping). '
+            '5 folds × 3 seeds = 15 models; test predictions are their average. A HistGradientBoosting blend was tested (0.629) but did not improve the out-of-fold score, so the final model is LightGBM only.')
+    insight('What the lift chart means', 'Alerts in the top predicted decile are escalated about 3× as often as those in the bottom decile (29.6% vs 9.2%), '
+            'so the model can meaningfully prioritise the review queue even though the overall signal is weak.')
+
+# ================= FINDINGS =================
+elif page == 'Findings':
+    section('Key Findings', 'What we learned and how it shaped the model.')
+    findings = [
+        ('01', 'Imbalanced target', f'{RATE:.2f}% of training alerts were escalated. We optimised ranking (ROC-AUC) directly rather than accuracy.'),
+        ('02', 'Every alert sits on a burst', 'Activity jumps in the days before almost every alert, for both classes. The burst itself is not discriminative.'),
+        ('03', 'Shares barely differ', 'Transaction type and direction shares are nearly identical between escalated and dismissed alerts.'),
+        ('04', 'Size inside a channel matters most', 'Minimum transaction size and mean size of bank-transfer outflows, cash inflows and card outflows were the top features.'),
+        ('05', 'Baseline history is informative', 'Many top features come from the 31–180 day baseline, i.e. the client\'s normal behavior, not only from the burst.'),
+        ('06', 'Richer features beat model tuning', 'Moving from global aggregates to type×direction and window features raised out-of-fold ROC-AUC from 0.599 to 0.636.')]
+    for n, t, x in findings:
+        st.markdown(f'<div class="find"><div style="color:#00e5ff;font-size:9px;font-weight:800;letter-spacing:2px">FINDING {n}</div><b>{t}</b><span>{x}</span></div>', unsafe_allow_html=True)
+    section('Conclusion', 'Summary and limitations.')
+    insight('Summary', f'Our final LightGBM model reaches an out-of-fold ROC-AUC of {FINAL_AUC:.3f} and ranks alerts so that the riskiest decile is escalated ~3× more often than the safest. '
+            'The strongest evidence of escalation lies in the size profile of specific transaction channels, compared with the client\'s own history.')
+    insight('Limitations & next steps', 'The data is synthetic and the separating signal is weak (AUC ≈ 0.64). Next steps: sequence models over raw transactions, '
+            'finer burst-shape features and hyperparameter search with repeated CV.')
+    st.markdown('<div style="text-align:center;padding:35px 0;color:#59677b;font-size:11px;letter-spacing:2px">RAW TRANSACTIONS → BEHAVIORAL FEATURES → SIGNAL INTELLIGENCE · TEAM A3783E69</div>', unsafe_allow_html=True)
